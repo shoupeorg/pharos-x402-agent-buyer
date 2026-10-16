@@ -30,7 +30,17 @@ function reportFrom(snapshot) {
 }
 
 export class BuyerEngine {
-  constructor(env) { this.env = env; this.store = new BuyerStore(env.DB); }
+  constructor(env, dependencies = {}) {
+    this.env = env;
+    this.store = new BuyerStore(env.DB);
+    this.dependencies = {
+      publicClient: dependencies.publicClient || publicClient,
+      handlePaidRequest: dependencies.handlePaidRequest || handlePaidRequest,
+      makeBuyerClient: dependencies.makeBuyerClient || makeBuyerClient,
+      verifySettlementReceipt: dependencies.verifySettlementReceipt || verifySettlementReceipt,
+      sleep: dependencies.sleep || sleep,
+    };
+  }
 
   async run({ runId, kind, config }) {
     const baseProfile = RUN_PROFILES[kind];
@@ -42,7 +52,7 @@ export class BuyerEngine {
       await this.store.recordEvent(runId, null, "REPLAY_NOOP", { sameRunId: true, noNewAuthorization: true, noNewDebit: true, resumedFromDurableD1: true });
       return this.store.snapshot(runId);
     }
-    const client = publicClient();
+    const client = this.dependencies.publicClient();
     const snapshotBlock = existing?.task.snapshot_block || (await client.getBlockNumber()).toString();
     await this.store.createTask({ id: runId, kind, ...profile, snapshotBlock });
     await this.store.recordEvent(runId, null, "RUN_CONFIGURATION", { kind, budgetAtomic: profile.budgetAtomic, capAtomic: profile.capAtomic, boundaryRule: "equality allowed; only greater-than is refused", snapshotBlock, retryDelaysMs: RETRY_DELAYS_MS });
@@ -73,8 +83,10 @@ export class BuyerEngine {
     let paymentPayload = prior?.payment_payload_json ? JSON.parse(prior.payment_payload_json) : null;
     if (paymentPayload) {
       const auth = paymentPayload.payload.authorization;
-      if (BigInt(auth.validBefore) <= BigInt(Math.floor(Date.now() / 1000))) {
-        const used = await publicClient().readContract({ address: this.env.PAYMENT_TOKEN, abi: tokenAbi, functionName: "authorizationState", args: [auth.from, auth.nonce] });
+      const client = this.dependencies.publicClient();
+      const chainHead = await client.getBlock({ blockTag: "latest" });
+      if (BigInt(auth.validBefore) <= BigInt(chainHead.timestamp)) {
+        const used = await client.readContract({ address: this.env.PAYMENT_TOKEN, abi: tokenAbi, functionName: "authorizationState", args: [auth.from, auth.nonce], blockNumber: chainHead.number });
         if (!used) {
           await this.store.retireExpiredAuthorization({ taskId: runId, intentId, amountAtomic: endpoint.priceAtomic, authId: authorizationId(paymentPayload) });
           paymentPayload = null;
@@ -82,7 +94,7 @@ export class BuyerEngine {
       }
     }
     if (!paymentPayload) {
-      const quoteResponse = await handlePaidRequest(new Request(url), this.env);
+      const quoteResponse = await this.dependencies.handlePaidRequest(new Request(url), this.env);
       if (quoteResponse.status !== 402) throw new Error(`Expected HTTP 402 from ${endpoint.path}, received ${quoteResponse.status}`);
       const header = quoteResponse.headers.get("PAYMENT-REQUIRED");
       if (!header) throw new Error("402 response lacked PAYMENT-REQUIRED header");
@@ -91,14 +103,9 @@ export class BuyerEngine {
       const reason = `${endpoint.label} is necessary to produce the two-source network brief`;
       await this.store.quoteIntent({ id: intentId, taskId: runId, endpoint: endpoint.path, amountAtomic: accepted.amount, reason });
       const task = await this.store.getTask(runId);
-      let decision = budgetDecision({ confirmedAtomic: task.confirmed_atomic, reservedAtomic: task.reserved_atomic, proposedAtomic: accepted.amount, budgetAtomic: task.budget_atomic, capAtomic: task.cap_atomic });
-      const globalRows = (await this.env.DB.prepare("SELECT confirmed_atomic,reserved_atomic FROM tasks").all()).results;
-      const globalCommitted = globalRows.reduce((sum, row) => sum + BigInt(row.confirmed_atomic) + BigInt(row.reserved_atomic), 0n);
-      if (decision.allowed && globalCommitted + BigInt(accepted.amount) > BigInt(this.env.GLOBAL_SPEND_LIMIT_ATOMIC || "50000")) {
-        decision = { allowed: false, state: "STOPPED_BUDGET", reason: "Server-side global x402 spend ceiling would be exceeded" };
-      }
-      if (!await this.store.reserve({ taskId: runId, intentId, amountAtomic: accepted.amount, decision })) return;
-      paymentPayload = await makeBuyerClient(this.env).createPaymentPayload(required);
+      const decision = budgetDecision({ confirmedAtomic: task.confirmed_atomic, reservedAtomic: task.reserved_atomic, proposedAtomic: accepted.amount, budgetAtomic: task.budget_atomic, capAtomic: task.cap_atomic });
+      if (!await this.store.reserve({ taskId: runId, intentId, amountAtomic: accepted.amount, decision, globalLimitAtomic: this.env.GLOBAL_SPEND_LIMIT_ATOMIC || "50000" })) return;
+      paymentPayload = await this.dependencies.makeBuyerClient(this.env).createPaymentPayload(required);
       const auth = paymentPayload.payload.authorization;
       if (getAddress(auth.from) !== getAddress(this.env.BUYER_ADDRESS) || auth.value !== accepted.amount || paymentPayload.accepted.amount !== accepted.amount) throw new Error("Created authorization does not match approved reservation");
       await this.store.markPending({ taskId: runId, intentId, authId: authorizationId(paymentPayload), payload: paymentPayload });
@@ -110,9 +117,9 @@ export class BuyerEngine {
     for (let index = 0; index < RETRY_DELAYS_MS.length; index += 1) {
       const attempt = index + 1;
       const delayMs = RETRY_DELAYS_MS[index];
-      if (delayMs) await sleep(delayMs);
+      if (delayMs) await this.dependencies.sleep(delayMs);
       try {
-        const paid = await handlePaidRequest(request(), this.env);
+        const paid = await this.dependencies.handlePaidRequest(request(), this.env);
         if (!paid.ok) throw new Error(`Paid request failed with HTTP ${paid.status}: ${(await paid.json()).error || "unknown"}`);
         if (profile.injectLostResponseAt === endpoint.path && !injected) {
           injected = true;
@@ -124,7 +131,7 @@ export class BuyerEngine {
         const settlement = decodePaymentResponseHeader(paymentResponse);
         if (!settlement.success || settlement.network !== NETWORK || !settlement.transaction) throw new Error("Settlement response was not successful on Atlantic");
         const data = await paid.json();
-        const receipt = await verifySettlementReceipt({ txHash: settlement.transaction, token: this.env.PAYMENT_TOKEN, payer: this.env.BUYER_ADDRESS, merchant: this.env.MERCHANT_ADDRESS, amountAtomic: endpoint.priceAtomic });
+        const receipt = await this.dependencies.verifySettlementReceipt({ txHash: settlement.transaction, token: this.env.PAYMENT_TOKEN, payer: this.env.BUYER_ADDRESS, merchant: this.env.MERCHANT_ADDRESS, amountAtomic: endpoint.priceAtomic });
         await this.store.recordAttempt(runId, intentId, attempt, delayMs, data.payment?.recovered ? "RECOVERED_PAID_RESPONSE" : "SUCCESS");
         await this.store.settle({ taskId: runId, intentId, amountAtomic: endpoint.priceAtomic, settlementHash: settlement.transaction, receipt, response: data });
         return;

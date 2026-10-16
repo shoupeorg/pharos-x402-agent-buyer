@@ -8,6 +8,7 @@ import { formatUnitsExact, parseUnitsExact } from "./money.js";
 import { publicClient, tokenAbi } from "./chain.js";
 import { getAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { SerialExecutor } from "./serial.js";
 
 const securityHeaders = {
   "Cache-Control": "no-store",
@@ -34,11 +35,12 @@ function runId(value) {
 }
 
 export class BuyerCoordinator {
-  constructor(_state, env) { this.env = env; }
-  async fetch(request) {
+  constructor(_state, env) { this.env = env; this.serial = new SerialExecutor(); }
+  fetch(request) { return this.serial.run(() => this.handle(request)); }
+  async handle(request) {
     try {
       const input = await request.json();
-      return Response.json(await new BuyerEngine(this.env).run({ runId: runId(input.runId), kind: input.kind, config: input.config }));
+      return Response.json(await new BuyerEngine(this.env, this.env.__TEST_DEPENDENCIES?.buyer).run({ runId: runId(input.runId), kind: input.kind, config: input.config }));
     } catch (error) { return Response.json({ error: error.message || "Buyer run failed" }, { status: 400 }); }
   }
 }

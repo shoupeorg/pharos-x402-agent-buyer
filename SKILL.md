@@ -61,7 +61,7 @@ For each of `/paid/network-snapshot` and `/paid/activity-summary`, the shared en
 8. Verifies the Atlantic receipt and exact token `Transfer` event before counting spend once.
 9. Persists the response and combines both resources into the network brief.
 
-If a submitted result is ambiguous, report `PENDING_RECONCILIATION`, retain the reservation, and do not create a new authorization. Never reinterpret a timeout as a failed payment. If a persisted authorization later expires, first query `authorizationState`: recover it when used; only when chain state proves it unused may the engine durably retire it, release its reservation, fetch a fresh quote, repeat the budget decision, and create a replacement.
+If a submitted result is ambiguous, report `PENDING_RECONCILIATION`, retain the reservation, and do not create a new authorization. Never reinterpret a timeout as a failed payment. Compare `validBefore` with the latest chain block timestamp, never local wall time. Once chain time has expired a persisted authorization, query `authorizationState` at that chain head: recover it when used; only when authoritative chain state proves it unused may the engine durably retire it, release its reservation, fetch a fresh quote, repeat the budget decision, and create a replacement.
 
 ## Output interpretation
 

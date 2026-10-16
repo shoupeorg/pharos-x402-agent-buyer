@@ -7,6 +7,7 @@ import { getAddress, parseSignature } from "viem";
 import { MAX_GAS_PER_SETTLEMENT, MAX_GAS_TOTAL, NETWORK } from "./constants.js";
 import { publicClient, readPaidResource, tokenAbi, verifySettlementReceipt } from "./chain.js";
 import { authorizationId, buildPaymentRequired, makeFacilitator } from "./protocol.js";
+import { SerialExecutor } from "./serial.js";
 
 const jsonHeaders = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" };
 const responseJson = (data, status = 200, headers = {}) => new Response(JSON.stringify(data), { status, headers: { ...jsonHeaders, ...headers } });
@@ -26,10 +27,9 @@ function assertPayloadMatches(paymentPayload, requirements, resourceUrl, env) {
   return auth;
 }
 
-async function estimatedSettlementGas(paymentPayload, env) {
+async function estimatedSettlementGas(paymentPayload, env, client = publicClient()) {
   const auth = paymentPayload.payload.authorization;
   const signature = parseSignature(paymentPayload.payload.signature);
-  const client = publicClient();
   return client.estimateContractGas({
     account: env.FACILITATOR_ADDRESS,
     address: env.PAYMENT_TOKEN,
@@ -39,8 +39,7 @@ async function estimatedSettlementGas(paymentPayload, env) {
   });
 }
 
-async function recoverUsedAuthorization(row, env) {
-  const client = publicClient();
+async function recoverUsedAuthorization(row, env, client = publicClient()) {
   const payload = JSON.parse(row.payload_json);
   const auth = payload.payload.authorization;
   const used = await client.readContract({ address: env.PAYMENT_TOKEN, abi: tokenAbi, functionName: "authorizationState", args: [auth.from, auth.nonce] });
@@ -56,14 +55,43 @@ async function recoverUsedAuthorization(row, env) {
 }
 
 export class SellerCoordinator {
-  constructor(_state, env) { this.env = env; }
-  async fetch(request) {
+  constructor(_state, env) {
+    this.env = env;
+    this.serial = new SerialExecutor();
+    const dependencies = env.__TEST_DEPENDENCIES?.seller || {};
+    this.dependencies = {
+      publicClient: dependencies.publicClient || publicClient,
+      makeFacilitator: dependencies.makeFacilitator || makeFacilitator,
+      verifySettlementReceipt: dependencies.verifySettlementReceipt || verifySettlementReceipt,
+      readPaidResource: dependencies.readPaidResource || readPaidResource,
+    };
+  }
+  fetch(request) { return this.serial.run(() => this.handle(request)); }
+  async handle(request) {
     try {
       const input = await request.json();
-      return responseJson(await this.process(input));
+      return responseJson(input.mode === "recover" ? await this.recover(input) : await this.process(input));
     } catch (error) {
       return responseJson({ error: error.message || "Seller settlement failed" }, 400);
     }
+  }
+
+  async recover({ endpoint, snapshotBlock, resourceUrl, paymentPayload, requirements }) {
+    const auth = assertPayloadMatches(paymentPayload, requirements, resourceUrl, this.env);
+    const authId = authorizationId(paymentPayload);
+    const payloadHash = await sha256(JSON.stringify(paymentPayload));
+    const row = await this.env.DB.prepare("SELECT * FROM seller_receipts WHERE auth_id=?").bind(authId).first();
+    if (!row || row.state !== "SETTLED") return { found: false, authId };
+    if (row.payload_hash !== payloadHash
+      || row.endpoint !== endpoint
+      || getAddress(row.payer) !== getAddress(auth.from)
+      || getAddress(row.merchant) !== getAddress(auth.to)
+      || row.amount_atomic !== auth.value
+      || (row.resource_url && row.resource_url !== resourceUrl)
+      || (row.snapshot_block && row.snapshot_block !== snapshotBlock)) {
+      throw new Error("Stored paid response is not bound to this payment and resource");
+    }
+    return { found: true, recovered: true, settlement: JSON.parse(row.settlement_json), receipt: JSON.parse(row.receipt_json || "null"), data: JSON.parse(row.response_json), authId };
   }
 
   async process({ endpoint, snapshotBlock, resourceUrl, paymentPayload, requirements }) {
@@ -76,26 +104,39 @@ export class SellerCoordinator {
     if (row && row.payload_hash !== payloadHash) throw new Error("Authorization identity collision with different payload");
     if (row?.state === "SETTLED") return { recovered: true, settlement: JSON.parse(row.settlement_json), receipt: JSON.parse(row.receipt_json || "null"), data: JSON.parse(row.response_json), authId };
 
-    const client = publicClient();
+    const client = this.dependencies.publicClient();
     if (!row) {
       const startBlock = (await client.getBlockNumber()).toString();
-      await env.DB.prepare("INSERT INTO seller_receipts(auth_id,endpoint,state,payload_hash,payload_json,payer,merchant,amount_atomic,start_block,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-        .bind(authId, endpoint, "PAYMENT_PENDING", payloadHash, payloadJson, auth.from, auth.to, auth.value, startBlock, timestamp(), timestamp()).run();
+      await env.DB.prepare("INSERT OR IGNORE INTO seller_receipts(auth_id,endpoint,state,payload_hash,payload_json,payer,merchant,amount_atomic,start_block,resource_url,snapshot_block,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(authId, endpoint, "PAYMENT_PENDING", payloadHash, payloadJson, auth.from, auth.to, auth.value, startBlock, resourceUrl, snapshotBlock, timestamp(), timestamp()).run();
       row = await env.DB.prepare("SELECT * FROM seller_receipts WHERE auth_id=?").bind(authId).first();
+      if (row.payload_hash !== payloadHash) throw new Error("Authorization identity collision with different payload");
     }
 
-    let transaction = await recoverUsedAuthorization(row, env);
+    const claimToken = crypto.randomUUID();
+    const claimNow = Math.floor(Date.now() / 1000);
+    await env.DB.prepare("UPDATE seller_receipts SET claim_token=?, claim_expires_at=?, attempt_count=attempt_count+1, updated_at=? WHERE auth_id=? AND state='PAYMENT_PENDING' AND (claim_token IS NULL OR claim_expires_at<?)")
+      .bind(claimToken, claimNow + 30, timestamp(), authId, claimNow).run();
+    row = await env.DB.prepare("SELECT * FROM seller_receipts WHERE auth_id=?").bind(authId).first();
+    if (row.state === "SETTLED") return { recovered: true, settlement: JSON.parse(row.settlement_json), receipt: JSON.parse(row.receipt_json || "null"), data: JSON.parse(row.response_json), authId };
+    if (row.claim_token !== claimToken) throw new Error("Settlement is already being reconciled; retry the same authorization");
+
+    let transaction = await recoverUsedAuthorization(row, env, client);
     let settlement;
     if (transaction) {
       settlement = { success: true, transaction, network: NETWORK, payer: auth.from };
     } else {
-      if (BigInt(auth.validBefore) <= BigInt(Math.floor(Date.now() / 1000))) throw new Error("Payment authorization expired before settlement");
+      const chainHead = await client.getBlock({ blockTag: "latest" });
+      if (BigInt(auth.validBefore) <= BigInt(chainHead.timestamp)) {
+        await env.DB.prepare("UPDATE seller_receipts SET claim_token=NULL,claim_expires_at=NULL,updated_at=? WHERE auth_id=? AND claim_token=?").bind(timestamp(), authId, claimToken).run();
+        throw new Error("Payment authorization expired before settlement according to chain block time");
+      }
       const spentRows = (await env.DB.prepare("SELECT receipt_json FROM seller_receipts WHERE state='SETTLED'").all()).results;
       const actualGas = spentRows.reduce((sum, item) => sum + BigInt(JSON.parse(item.receipt_json || "{}").gasUsed || 0), 0n);
-      const estimate = await estimatedSettlementGas(paymentPayload, env);
+      const estimate = await estimatedSettlementGas(paymentPayload, env, client);
       if (estimate > MAX_GAS_PER_SETTLEMENT) throw new Error(`Settlement gas estimate ${estimate} exceeds per-transaction ceiling ${MAX_GAS_PER_SETTLEMENT}`);
       if (actualGas + estimate > MAX_GAS_TOTAL) throw new Error("Server-side global settlement gas ceiling reached");
-      const facilitator = makeFacilitator(env);
+      const facilitator = this.dependencies.makeFacilitator(env);
       const verified = await facilitator.verify(paymentPayload, requirements);
       if (!verified.isValid) throw new Error(`Facilitator verification rejected payment: ${verified.invalidReason || "unknown reason"}`);
       settlement = await facilitator.settle(paymentPayload, requirements);
@@ -103,10 +144,12 @@ export class SellerCoordinator {
       transaction = settlement.transaction;
     }
 
-    const receipt = await verifySettlementReceipt({ txHash: transaction, token: env.PAYMENT_TOKEN, payer: auth.from, merchant: auth.to, amountAtomic: auth.value });
-    const data = await readPaidResource(endpoint, snapshotBlock, env);
-    await env.DB.prepare("UPDATE seller_receipts SET state='SETTLED', settlement_hash=?, settlement_json=?, receipt_json=?, response_json=?, updated_at=? WHERE auth_id=?")
-      .bind(transaction, JSON.stringify(settlement), JSON.stringify(receipt), JSON.stringify(data), timestamp(), authId).run();
+    const receipt = await this.dependencies.verifySettlementReceipt({ txHash: transaction, token: env.PAYMENT_TOKEN, payer: auth.from, merchant: auth.to, amountAtomic: auth.value });
+    const data = await this.dependencies.readPaidResource(endpoint, snapshotBlock, env);
+    await env.DB.prepare("UPDATE seller_receipts SET state='SETTLED', settlement_hash=?, settlement_json=?, receipt_json=?, response_json=?, claim_token=NULL,claim_expires_at=NULL,updated_at=? WHERE auth_id=? AND state='PAYMENT_PENDING' AND claim_token=?")
+      .bind(transaction, JSON.stringify(settlement), JSON.stringify(receipt), JSON.stringify(data), timestamp(), authId, claimToken).run();
+    const final = await env.DB.prepare("SELECT state,settlement_hash FROM seller_receipts WHERE auth_id=?").bind(authId).first();
+    if (final?.state !== "SETTLED" || final.settlement_hash !== transaction) throw new Error("Settlement result was not durably recorded by its claim owner");
     return { recovered: false, settlement, receipt, data, authId };
   }
 }
@@ -115,11 +158,11 @@ export async function handlePaidRequest(request, env) {
   const url = new URL(request.url);
   const snapshotBlock = url.searchParams.get("block");
   if (!/^\d+$/.test(snapshotBlock || "")) return responseJson({ error: "A numeric pinned block query parameter is required" }, 400);
-  const latest = await publicClient().getBlockNumber();
-  if (BigInt(snapshotBlock) > latest || latest - BigInt(snapshotBlock) > 1000n) return responseJson({ error: "Pinned block is unavailable or older than 1,000 blocks" }, 400);
   const paymentRequired = buildPaymentRequired({ origin: url.origin, path: url.pathname, snapshotBlock, env });
   const signatureHeader = request.headers.get("PAYMENT-SIGNATURE");
   if (!signatureHeader) {
+    const latest = await (env.__TEST_DEPENDENCIES?.seller?.publicClient || publicClient)().getBlockNumber();
+    if (BigInt(snapshotBlock) > latest || latest - BigInt(snapshotBlock) > 1000n) return responseJson({ error: "Pinned block is unavailable or older than 1,000 blocks" }, 400);
     return responseJson(paymentRequired, 402, { "PAYMENT-REQUIRED": encodePaymentRequiredHeader(paymentRequired) });
   }
   let paymentPayload;
@@ -127,7 +170,15 @@ export async function handlePaidRequest(request, env) {
   const requirements = paymentRequired.accepts[0];
   const authId = authorizationId(paymentPayload);
   const stub = env.SELLER.get(env.SELLER.idFromName("seller-global"));
-  const processed = await stub.fetch("https://seller.internal/settle", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ endpoint: url.pathname, snapshotBlock, resourceUrl: url.toString(), paymentPayload, requirements }) });
+  const input = { endpoint: url.pathname, snapshotBlock, resourceUrl: url.toString(), paymentPayload, requirements };
+  const recovery = await stub.fetch("https://seller.internal/recover", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "recover", ...input }) });
+  const recovered = await recovery.json();
+  if (!recovery.ok) return responseJson({ error: recovered.error, state: "PENDING_RECONCILIATION", authId }, 502);
+  if (recovered.found) return responseJson({ ...recovered.data, payment: { authId, recovered: true } }, 200, { "PAYMENT-RESPONSE": encodePaymentResponseHeader(recovered.settlement) });
+
+  const latest = await (env.__TEST_DEPENDENCIES?.seller?.publicClient || publicClient)().getBlockNumber();
+  if (BigInt(snapshotBlock) > latest || latest - BigInt(snapshotBlock) > 1000n) return responseJson({ error: "Pinned block is unavailable or older than 1,000 blocks" }, 400);
+  const processed = await stub.fetch("https://seller.internal/settle", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
   const result = await processed.json();
   if (!processed.ok) return responseJson({ error: result.error, state: "PENDING_RECONCILIATION", authId }, 502);
   return responseJson({ ...result.data, payment: { authId, recovered: result.recovered } }, 200, { "PAYMENT-RESPONSE": encodePaymentResponseHeader(result.settlement) });

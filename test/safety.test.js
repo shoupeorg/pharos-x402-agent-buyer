@@ -47,7 +47,7 @@ test("an expired unused authorization is released before a fresh quote and decis
   assert.match(engine, /retireExpiredAuthorization/);
   assert.match(store, /AUTHORIZATION_EXPIRED_UNUSED/);
   assert.match(store, /requiresFreshQuoteAndDecision: true/);
-  assert.match(store, /reserved_atomic=\?, readonly=0/);
+  assert.match(store, /DELETE FROM budget_reservations WHERE intent_id=\? AND state='RELEASED'/);
 });
 
 test("security headers clone Durable Object responses and paid snapshots use the pinned block base fee", () => {

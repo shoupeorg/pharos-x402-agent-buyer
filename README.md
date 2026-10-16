@@ -102,8 +102,8 @@ All PXUSD amounts are decimal strings parsed into `BigInt` atomic units. JavaScr
 - `proposed <= per-call cap` is allowed.
 - `confirmed + reserved + proposed <= total budget` is allowed.
 - A strict excess is refused before signing.
-- A globally serialized Durable Object guards all reservations, including concurrent clicks and restarts.
-- A server-wide atomic spend ceiling is enforced in addition to each immutable task budget.
+- Explicit per-instance queues serialize complete buyer and seller operations; correctness across restarts does not depend on those in-memory queues.
+- D1 reservation triggers conditionally enforce the immutable task cap/budget and a singleton server-wide spend ledger in the same database statement. Unique intent, settlement, event, and seller-authorization keys make state transitions idempotent.
 - PHRS facilitator gas is tracked independently and is never added to the PXUSD API budget.
 
 ## Durable state and retry guarantees
@@ -116,7 +116,11 @@ State path:
 
 Refusal/error states: `REFUSED_PRICE_CAP`, `STOPPED_BUDGET`, `FAILED`, `PENDING_RECONCILIATION`.
 
-The retry schedule is bounded to three attempts with delays `0`, `250`, and `750` ms. The payment payload is persisted before submission and reused verbatim. No attempt loop creates another authorization. A timeout after submission is ambiguous: the reservation remains while the facilitator pending store and chain authorization state are reconciled. The seller serializes settlement globally, uniquely keys a purchase by payer + EIP-3009 nonce, and returns the stored paid response when that same authorization is replayed.
+The retry schedule is bounded to three attempts with delays `0`, `250`, and `750` ms. The payment payload is persisted before submission and reused verbatim. No attempt loop creates another authorization. A timeout after submission is ambiguous: the reservation remains while the facilitator pending store and chain authorization state are reconciled. Before a facilitator submission, the seller obtains a durable expiring D1 claim on the payer + EIP-3009 nonce; another process cannot submit the same authorization concurrently. After a crash, the next claimant first checks authoritative `authorizationState` and reconciles `AuthorizationUsed` logs before considering submission.
+
+An authenticated replay of the exact stored payload can recover its original settled response even after the pinned block is more than 1,000 blocks old or the authorization has expired. Payload hash, authorization identity, payer, merchant, amount, endpoint, resource URL, and snapshot block must all match. The 1,000-block freshness rule still applies before every new purchase.
+
+Authorization retirement uses the latest chain block timestamp, not the Worker wall clock. Once chain time passes `validBefore`, the engine queries `authorizationState` at that chain head: a used authorization remains recoverable; only an authoritatively unused one is retired and its reservation released before a new quote and authorization.
 
 This is a specific deduplication and reconciliation guarantee, not a claim of unconditional exactly-once delivery across HTTP and blockchain.
 
@@ -142,7 +146,7 @@ The resumable script finds or creates the exact-name D1 database, writes one val
 
 ## Tests
 
-`npm test` has 13 passing tests covering exact decimal parsing, equality boundaries, strict cap/budget refusal, serialized concurrent reservation, official SDK v2 payload/header round-trip, authorization identity, mismatched requirements, protected-resource guard, owner-only spend control, same-authorization retry structure, EIP-3009 gas-estimation ABI, pending reconciliation, expired-unused authorization recovery, immutable-response handling, and pinned-block base-fee logic. Deterministic unit tests are not presented as chain evidence.
+`npm test` includes behavioral tests against the real buyer/seller engine and coordinator classes backed by in-memory SQLite through a D1-compatible adapter. They exercise concurrent duplicate runs, a conditional near-limit global reservation race, one debit/one spend entry after a lost response, concurrent seller claims with one facilitator submission, recovery of a settled response older than 1,000 blocks, restart reconciliation without replacement authorization, and chain-time plus authoritative-state retirement. The existing arithmetic, SDK/protocol, access-control, ABI, and pinned-read tests also run. These deterministic regression tests make no blockchain transaction and are not presented as live-chain payment evidence.
 
 ## Permanent reviewer evidence
 
