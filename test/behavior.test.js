@@ -6,7 +6,7 @@ import { BuyerEngine } from "../src/buyer-engine.js";
 import { BuyerStore } from "../src/store.js";
 import { SellerCoordinator, handlePaidRequest } from "../src/seller.js";
 import { authorizationId, buildPaymentRequired } from "../src/protocol.js";
-import { NETWORK } from "../src/constants.js";
+import { ENDPOINTS, NETWORK } from "../src/constants.js";
 import { createDatabase } from "./support/sqlite-d1.js";
 
 const ADDRESSES = {
@@ -150,6 +150,83 @@ test("settled response is recoverable after its snapshot is more than 1,000 bloc
   const response = await handlePaidRequest(new Request(url, { headers: { "PAYMENT-SIGNATURE": encodePaymentSignatureHeader(payload) } }), env);
   assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).payment, { authId: authorizationId(payload), recovered: true });
+});
+
+test("pending on-chain settlement reconciles after 1,000 blocks without a new debit or authorization", async (t) => {
+  const db = createDatabase(); t.after(() => db.close());
+  let latestBlock = 500n;
+  let authorizationUsed = false;
+  let crashBeforePersistence = true;
+  let facilitatorSubmissions = 0;
+  let payloadCreations = 0;
+  const transaction = hash(775);
+  const env = { DB: db, PUBLIC_ORIGIN: "https://seller.test", GLOBAL_SPEND_LIMIT_ATOMIC: "50000", ...ADDRESSES };
+  const url = "https://seller.test/paid/network-snapshot?block=1";
+  const required = buildPaymentRequired({ origin: "https://seller.test", path: "/paid/network-snapshot", snapshotBlock: "1", env });
+  const payload = {
+    x402Version: 2,
+    resource: required.resource,
+    accepted: required.accepts[0],
+    payload: { authorization: { from: env.BUYER_ADDRESS, to: env.MERCHANT_ADDRESS, value: "1000", validAfter: "0", validBefore: "9999", nonce: hash(775) }, signature: `0x${"44".repeat(64)}1b` },
+  };
+  const client = {
+    getBlockNumber: async () => latestBlock,
+    getBlock: async () => ({ number: latestBlock, timestamp: 100n }),
+    readContract: async () => authorizationUsed,
+    getLogs: async () => authorizationUsed ? [{ transactionHash: transaction }] : [],
+    estimateContractGas: async () => 100n,
+  };
+  const dependencies = {
+    seller: {
+      publicClient: () => client,
+      makeFacilitator: () => ({
+        verify: async () => ({ isValid: true }),
+        settle: async () => { facilitatorSubmissions += 1; authorizationUsed = true; return { success: true, transaction, network: NETWORK, payer: env.BUYER_ADDRESS }; },
+      }),
+      verifySettlementReceipt: async () => {
+        if (crashBeforePersistence) throw new Error("simulated process crash after mined settlement");
+        return { status: "success", transactionHash: transaction, gasUsed: "100" };
+      },
+      readPaidResource: async (endpoint, snapshotBlock) => ({ endpoint, blockNumber: snapshotBlock, baseFeePerGasWei: "7" }),
+    },
+    buyer: {
+      publicClient: () => client,
+      handlePaidRequest,
+      makeBuyerClient: () => ({ createPaymentPayload: async () => { payloadCreations += 1; return payload; } }),
+      verifySettlementReceipt: async () => ({ status: "success", transactionHash: transaction, gasUsed: "100" }),
+      sleep: async () => {},
+    },
+  };
+  env.__TEST_DEPENDENCIES = dependencies;
+  let seller = new SellerCoordinator({}, env);
+  env.SELLER = { idFromName: (name) => name, get: () => ({ fetch: (target, init) => seller.fetch(new Request(target, init)) }) };
+
+  const store = new BuyerStore(db);
+  await store.createTask({ id: "stale-pending-recovery", kind: "SUCCESS", budgetAtomic: "5000", capAtomic: "2000", snapshotBlock: "1" });
+  await store.quoteIntent({ id: "stale-pending-recovery:network-snapshot", taskId: "stale-pending-recovery", endpoint: "/paid/network-snapshot", amountAtomic: "1000", reason: "test recovery" });
+  await store.reserve({ taskId: "stale-pending-recovery", intentId: "stale-pending-recovery:network-snapshot", amountAtomic: "1000", decision: { allowed: true, state: "APPROVED", reason: "within policy" }, globalLimitAtomic: "50000" });
+  await store.markPending({ taskId: "stale-pending-recovery", intentId: "stale-pending-recovery:network-snapshot", authId: authorizationId(payload), payload });
+
+  const initial = await handlePaidRequest(new Request(url, { headers: { "PAYMENT-SIGNATURE": encodePaymentSignatureHeader(payload) } }), env);
+  assert.equal(initial.status, 502);
+  assert.equal(facilitatorSubmissions, 1);
+  assert.equal((await db.prepare("SELECT state FROM seller_receipts WHERE auth_id=?").bind(authorizationId(payload)).first()).state, "PAYMENT_PENDING");
+
+  crashBeforePersistence = false;
+  latestBlock = 5000n;
+  await db.prepare("UPDATE seller_receipts SET claim_expires_at=0 WHERE auth_id=?").bind(authorizationId(payload)).run();
+  seller = new SellerCoordinator({}, env);
+  const prior = await db.prepare("SELECT * FROM payment_intents WHERE id=?").bind("stale-pending-recovery:network-snapshot").first();
+  await new BuyerEngine(env, dependencies.buyer).purchase({ runId: "stale-pending-recovery", intentId: prior.id, endpoint: ENDPOINTS[0], profile: { injectLostResponseAt: null }, snapshotBlock: "1", prior });
+
+  const recovered = await store.snapshot("stale-pending-recovery");
+  assert.equal(facilitatorSubmissions, 1, "reconciliation never submitted a replacement payment");
+  assert.equal(payloadCreations, 0, "the original persisted authorization was reused");
+  assert.equal(recovered.task.confirmed_atomic, "1000");
+  assert.equal(recovered.task.reserved_atomic, "0");
+  assert.equal(recovered.events.filter((event) => event.type === "SETTLED").length, 1);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS count FROM budget_reservations WHERE state='CONFIRMED'").first()).count, 1);
+  assert.equal((await db.prepare("SELECT state FROM seller_receipts WHERE auth_id=?").bind(authorizationId(payload)).first()).state, "SETTLED");
 });
 
 test("durable seller claim permits only one facilitator submission across coordinator instances", async (t) => {

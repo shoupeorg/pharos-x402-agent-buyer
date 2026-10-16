@@ -63,6 +63,8 @@ For each of `/paid/network-snapshot` and `/paid/activity-summary`, the shared en
 
 If a submitted result is ambiguous, report `PENDING_RECONCILIATION`, retain the reservation, and do not create a new authorization. Never reinterpret a timeout as a failed payment. Compare `validBefore` with the latest chain block timestamp, never local wall time. Once chain time has expired a persisted authorization, query `authorizationState` at that chain head: recover it when used; only when authoritative chain state proves it unused may the engine durably retire it, release its reservation, fetch a fresh quote, repeat the budget decision, and create a replacement.
 
+For the exact persisted authorization only, reconciliation may recover a mined settlement and the originally pinned resource after the normal 1,000-block quote window. This recovery-only path must never submit to the facilitator. If the settlement receipt or historical resource is unavailable, keep `PENDING_RECONCILIATION` and retain the reservation.
+
 ## Output interpretation
 
 - `COMPLETED`: both genuine paid resources and verified receipts are present.

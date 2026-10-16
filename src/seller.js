@@ -81,7 +81,7 @@ export class SellerCoordinator {
     const authId = authorizationId(paymentPayload);
     const payloadHash = await sha256(JSON.stringify(paymentPayload));
     const row = await this.env.DB.prepare("SELECT * FROM seller_receipts WHERE auth_id=?").bind(authId).first();
-    if (!row || row.state !== "SETTLED") return { found: false, authId };
+    if (!row) return { found: false, pending: false, authId };
     if (row.payload_hash !== payloadHash
       || row.endpoint !== endpoint
       || getAddress(row.payer) !== getAddress(auth.from)
@@ -91,10 +91,12 @@ export class SellerCoordinator {
       || (row.snapshot_block && row.snapshot_block !== snapshotBlock)) {
       throw new Error("Stored paid response is not bound to this payment and resource");
     }
+    if (row.state === "PAYMENT_PENDING") return { found: false, pending: true, authId };
+    if (row.state !== "SETTLED") throw new Error(`Stored payment has unsupported recovery state ${row.state}`);
     return { found: true, recovered: true, settlement: JSON.parse(row.settlement_json), receipt: JSON.parse(row.receipt_json || "null"), data: JSON.parse(row.response_json), authId };
   }
 
-  async process({ endpoint, snapshotBlock, resourceUrl, paymentPayload, requirements }) {
+  async process({ endpoint, snapshotBlock, resourceUrl, paymentPayload, requirements, reconciliationOnly = false }) {
     const env = this.env;
     const auth = assertPayloadMatches(paymentPayload, requirements, resourceUrl, env);
     const authId = authorizationId(paymentPayload);
@@ -106,6 +108,7 @@ export class SellerCoordinator {
 
     const client = this.dependencies.publicClient();
     if (!row) {
+      if (reconciliationOnly) throw new Error("No matching pending authorization exists for stale reconciliation");
       const startBlock = (await client.getBlockNumber()).toString();
       await env.DB.prepare("INSERT OR IGNORE INTO seller_receipts(auth_id,endpoint,state,payload_hash,payload_json,payer,merchant,amount_atomic,start_block,resource_url,snapshot_block,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(authId, endpoint, "PAYMENT_PENDING", payloadHash, payloadJson, auth.from, auth.to, auth.value, startBlock, resourceUrl, snapshotBlock, timestamp(), timestamp()).run();
@@ -126,6 +129,10 @@ export class SellerCoordinator {
     if (transaction) {
       settlement = { success: true, transaction, network: NETWORK, payer: auth.from };
     } else {
+      if (reconciliationOnly) {
+        await env.DB.prepare("UPDATE seller_receipts SET claim_token=NULL,claim_expires_at=NULL,updated_at=? WHERE auth_id=? AND claim_token=?").bind(timestamp(), authId, claimToken).run();
+        throw new Error("Pending authorization has no authoritative on-chain settlement; stale reconciliation cannot submit a new payment");
+      }
       const chainHead = await client.getBlock({ blockTag: "latest" });
       if (BigInt(auth.validBefore) <= BigInt(chainHead.timestamp)) {
         await env.DB.prepare("UPDATE seller_receipts SET claim_token=NULL,claim_expires_at=NULL,updated_at=? WHERE auth_id=? AND claim_token=?").bind(timestamp(), authId, claimToken).run();
@@ -145,7 +152,9 @@ export class SellerCoordinator {
     }
 
     const receipt = await this.dependencies.verifySettlementReceipt({ txHash: transaction, token: env.PAYMENT_TOKEN, payer: auth.from, merchant: auth.to, amountAtomic: auth.value });
-    const data = await this.dependencies.readPaidResource(endpoint, snapshotBlock, env);
+    const storedEndpoint = row.endpoint;
+    const storedSnapshotBlock = row.snapshot_block || snapshotBlock;
+    const data = await this.dependencies.readPaidResource(storedEndpoint, storedSnapshotBlock, env);
     await env.DB.prepare("UPDATE seller_receipts SET state='SETTLED', settlement_hash=?, settlement_json=?, receipt_json=?, response_json=?, claim_token=NULL,claim_expires_at=NULL,updated_at=? WHERE auth_id=? AND state='PAYMENT_PENDING' AND claim_token=?")
       .bind(transaction, JSON.stringify(settlement), JSON.stringify(receipt), JSON.stringify(data), timestamp(), authId, claimToken).run();
     const final = await env.DB.prepare("SELECT state,settlement_hash FROM seller_receipts WHERE auth_id=?").bind(authId).first();
@@ -175,6 +184,13 @@ export async function handlePaidRequest(request, env) {
   const recovered = await recovery.json();
   if (!recovery.ok) return responseJson({ error: recovered.error, state: "PENDING_RECONCILIATION", authId }, 502);
   if (recovered.found) return responseJson({ ...recovered.data, payment: { authId, recovered: true } }, 200, { "PAYMENT-RESPONSE": encodePaymentResponseHeader(recovered.settlement) });
+
+  if (recovered.pending) {
+    const reconciledResponse = await stub.fetch("https://seller.internal/reconcile", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...input, reconciliationOnly: true }) });
+    const reconciled = await reconciledResponse.json();
+    if (!reconciledResponse.ok) return responseJson({ error: reconciled.error, state: "PENDING_RECONCILIATION", authId }, 502);
+    return responseJson({ ...reconciled.data, payment: { authId, recovered: true } }, 200, { "PAYMENT-RESPONSE": encodePaymentResponseHeader(reconciled.settlement) });
+  }
 
   const latest = await (env.__TEST_DEPENDENCIES?.seller?.publicClient || publicClient)().getBlockNumber();
   if (BigInt(snapshotBlock) > latest || latest - BigInt(snapshotBlock) > 1000n) return responseJson({ error: "Pinned block is unavailable or older than 1,000 blocks" }, 400);
