@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="description" content="A durable x402 agent buyer on Pharos Atlantic Testnet." />
+  <title>Pharos x402 Agent Buyer</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="/pharos-logo.png" />
+</head>
+<body>
+<main class="desktop">
+  <header class="desktop-header">
+    <a class="brand" href="/"><span class="logo-box"><img src="/pharos-logo.png" alt="Pharos logo" /></span><span>PHAROS<span class="brand-sub">x402 AGENT BUYER</span></span></a>
+    <span class="desktop-badge">ATLANTIC TESTNET / 688689</span>
+  </header>
+  <section class="app-window">
+    <div class="titlebar"><span><b>◆</b> X402_BUYER.EXE</span><span class="window-chrome"><i>_</i><i>□</i><i>×</i></span></div>
+    <div class="menubar"><span>HTTP 402</span><span>DURABLE D1</span><span class="menu-right">TEST TOKEN / REAL SETTLEMENT</span></div>
+    <div class="window-body">
+      <section class="intro">
+        <p class="kicker">PHAROS AGENT ARENA / BUDGETED PAID-RESOURCE ENGINE</p>
+        <h1>QUOTE → AUTHORIZE → SETTLE → REPORT<span class="cursor">_</span></h1>
+        <p>Buy two project-operated resources through x402 v2, enforce exact spend controls before signing, verify each Atlantic receipt, and combine both paid responses into a useful network brief.</p>
+      </section>
+      <section class="notice"><b>TESTNET PAYMENT</b><span>Owner-only live buttons spend PXUSD test tokens. The facilitator pays a small amount of Atlantic PHRS gas. No mainnet funds are used.</span></section>
+
+      <fieldset class="panel">
+        <legend>01 · NETWORK &amp; PAYMENT FOUNDATION</legend>
+        <div id="foundation" class="source-grid"><div class="empty">LOADING VERIFIED CONFIGURATION…</div></div>
+      </fieldset>
+
+      <fieldset class="panel">
+        <legend>02 · IMMUTABLE RUN CONFIGURATION</legend>
+        <div class="config-grid">
+          <label><span>OWNER TOKEN (NEVER STORED)</span><input id="owner-token" type="password" autocomplete="off" placeholder="Required only for spending runs" /></label>
+          <label><span>TOTAL API BUDGET (PXUSD)</span><input id="budget" value="0.005" inputmode="decimal" /></label>
+          <label><span>PER-CALL PRICE CAP (PXUSD)</span><input id="cap" value="0.002" inputmode="decimal" /></label>
+        </div>
+        <div class="controls">
+          <button id="run-success" class="primary" type="button">Run Successful Task (Spends Test PXUSD)</button>
+          <button id="run-budget" class="primary" type="button">Run Budget-Limited Task (Spends Test PXUSD)</button>
+          <button id="test-cap" class="classic" type="button">Test Price Cap (No Spend)</button>
+        </div>
+        <p class="microcopy">Equality is allowed: quote = cap and confirmed + reserved + quote = budget pass. Only a strict excess is refused. Duplicate clicks reuse one run ID and are serialized server-side.</p>
+      </fieldset>
+
+      <fieldset class="panel">
+        <legend>03 · PERMANENT REVIEWER EVIDENCE</legend>
+        <div class="controls evidence-buttons">
+          <button id="view-success" class="classic" type="button">View Recorded Success</button>
+          <button id="view-budget" class="classic" type="button">View Recorded Budget Stop</button>
+          <button id="view-retry" class="classic" type="button">View Retry / Replay Evidence</button>
+          <button id="refresh" class="classic" type="button">Refresh History</button>
+        </div>
+      </fieldset>
+
+      <section class="telemetry">
+        <div><span>CONNECTION</span><strong id="connection">STARTING</strong></div>
+        <div><span>RUN ID</span><strong id="run-id">—</strong></div>
+        <div><span>FINAL STATE</span><strong id="decision">—</strong></div>
+        <div><span>CONFIRMED / RESERVED</span><strong id="spend">—</strong></div>
+        <div><span>REMAINING</span><strong id="remaining">—</strong></div>
+      </section>
+
+      <section class="output-window">
+        <div class="output-title"><span>04 · ENDPOINT_DECISIONS.LOG</span><span>LIVE + DURABLE</span></div>
+        <div id="intents"><div class="empty">SELECT OR RUN EVIDENCE</div></div>
+      </section>
+      <section class="output-window">
+        <div class="output-title"><span>05 · RECEIPTS_AND_PURCHASED_DATA.OUT</span><span>ATLANTIC EXPLORER LINKS</span></div>
+        <div id="receipts"><div class="empty">NO SETTLEMENT SELECTED</div></div>
+      </section>
+      <section class="output-window">
+        <div class="output-title"><span>06 · FINAL_NETWORK_BRIEF.TXT</span><span>TWO PAID INPUTS REQUIRED</span></div>
+        <pre id="report">No completed report selected.</pre>
+      </section>
+      <section class="output-window">
+        <div class="output-title"><span>07 · STATE_TRANSITIONS_AND_RETRY.TRACE</span><span>PAYLOADS REDACTED</span></div>
+        <div class="table-wrap"><table><thead><tr><th>#</th><th>TIME</th><th>INTENT</th><th>STATE / EVENT</th><th>DETAIL</th></tr></thead><tbody id="events"><tr><td colspan="5">NO EVENT HISTORY</td></tr></tbody></table></div>
+      </section>
+    </div>
+    <div class="statusbar"><span><i></i><b id="system-status">SYSTEM STARTING</b></span><span id="action-status">NO ACTION</span><span>x402 v2 / EXACT / EIP-3009</span></div>
+  </section>
+  <footer><span>PHAROS AGENT ARENA · x402 AGENT BUYER</span><span><a href="https://docs.pharos.xyz/developer-guide/x402/x402-atlantic-testnet" target="_blank" rel="noopener noreferrer">OFFICIAL PHAROS x402 DOCS ↗</a> · <a href="https://github.com/shoupeorg/pharos-x402-agent-buyer" target="_blank" rel="noopener noreferrer">SOURCE ↗</a></span></footer>
+</main>
+<script src="/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pharos-x402-agent-buyer",
+  "main": "dist/worker.js",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "PUBLIC_ORIGIN": "https://pharos-x402-agent-buyer.shoupeorg.workers.dev",
+    "PAYMENT_TOKEN": "0x71d7a8a38A777C5bB84a9aac5c5A727EE7955687",
+    "BUYER_ADDRESS": "0x03091878d4C83B3c4f803D37bAd11a7d43056b43",
+    "MERCHANT_ADDRESS": "0x3B4a94628dB579353F39f980400DD5EC050D8979",
+    "FACILITATOR_ADDRESS": "0x5e8cE33c83674dE1D594c325aC3C11E55AcAF124",
+    "GLOBAL_SPEND_LIMIT_ATOMIC": "50000"
+  },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/paid/*", "/facilitator/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "pharos-x402-agent-buyer",
+      "database_id": "3a6a45cb-4bdb-4cc6-a1ca-b6c33e023cbe",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "BUYER", "class_name": "BuyerCoordinator" },
+      { "name": "SELLER", "class_name": "SellerCoordinator" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["BuyerCoordinator", "SellerCoordinator"] }
+  ],
+  "observability": { "enabled": true }
+}

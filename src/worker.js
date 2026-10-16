@@ -1,0 +1,113 @@
+import { Hono } from "hono";
+import { BuyerEngine, RUN_PROFILES } from "./buyer-engine.js";
+import { BuyerStore } from "./store.js";
+import { SellerCoordinator, handlePaidRequest } from "./seller.js";
+import { makeFacilitator } from "./protocol.js";
+import { CHAIN_ID, CHAIN_NAME, ENDPOINTS, EXPLORER_URL, NETWORK, PROTOCOL_VERSION, RETRY_DELAYS_MS, TOKEN_DECIMALS, TOKEN_SYMBOL } from "./constants.js";
+import { formatUnitsExact, parseUnitsExact } from "./money.js";
+import { publicClient, tokenAbi } from "./chain.js";
+import { getAddress } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+
+const securityHeaders = {
+  "Cache-Control": "no-store",
+  "Content-Security-Policy": "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  "Referrer-Policy": "no-referrer",
+  "X-Content-Type-Options": "nosniff",
+};
+
+function safeEqual(left = "", right = "") {
+  const a = String(left); const b = String(right);
+  let mismatch = a.length ^ b.length;
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index += 1) mismatch |= (a.charCodeAt(index % Math.max(a.length, 1)) || 0) ^ (b.charCodeAt(index % Math.max(b.length, 1)) || 0);
+  return mismatch === 0;
+}
+function isOwner(request, env) {
+  const header = request.headers.get("authorization") || "";
+  return header.startsWith("Bearer ") && safeEqual(header.slice(7), env.OWNER_TOKEN || "missing");
+}
+function requireOwner(c) { if (!isOwner(c.req.raw, c.env)) return c.json({ error: "Owner authorization required for any flow that can spend test tokens" }, 401); }
+function runId(value) {
+  if (!/^[a-z0-9][a-z0-9-]{7,80}$/.test(value || "")) throw new Error("runId must be 8-81 lowercase letters, digits, or hyphens");
+  return value;
+}
+
+export class BuyerCoordinator {
+  constructor(_state, env) { this.env = env; }
+  async fetch(request) {
+    try {
+      const input = await request.json();
+      return Response.json(await new BuyerEngine(this.env).run({ runId: runId(input.runId), kind: input.kind, config: input.config }));
+    } catch (error) { return Response.json({ error: error.message || "Buyer run failed" }, { status: 400 }); }
+  }
+}
+export { SellerCoordinator };
+
+const app = new Hono();
+app.use("*", async (c, next) => {
+  await next();
+  const headers = new Headers(c.res.headers);
+  Object.entries(securityHeaders).forEach(([key, value]) => headers.set(key, value));
+  c.res = new Response(c.res.body, { status: c.res.status, statusText: c.res.statusText, headers });
+});
+
+app.get("/api/config", async (c) => {
+  const client = publicClient();
+  const configuredAddresses = c.env.PAYMENT_TOKEN && c.env.BUYER_ADDRESS && c.env.MERCHANT_ADDRESS && c.env.FACILITATOR_ADDRESS;
+  const tokenCode = configuredAddresses ? await client.getBytecode({ address: c.env.PAYMENT_TOKEN }) : null;
+  const configured = Boolean(configuredAddresses && tokenCode && tokenCode !== "0x");
+  let token = null;
+  if (configured) {
+    const [name, symbol, decimals, version, domain] = await Promise.all([
+      client.readContract({ address: c.env.PAYMENT_TOKEN, abi: tokenAbi, functionName: "name" }),
+      client.readContract({ address: c.env.PAYMENT_TOKEN, abi: tokenAbi, functionName: "symbol" }),
+      client.readContract({ address: c.env.PAYMENT_TOKEN, abi: tokenAbi, functionName: "decimals" }),
+      client.readContract({ address: c.env.PAYMENT_TOKEN, abi: tokenAbi, functionName: "version" }),
+      client.readContract({ address: c.env.PAYMENT_TOKEN, abi: tokenAbi, functionName: "DOMAIN_SEPARATOR" }),
+    ]);
+    token = { address: getAddress(c.env.PAYMENT_TOKEN), name, symbol, decimals, version, domainSeparator: domain };
+  }
+  return c.json({ ready: Boolean(configured), chain: { name: CHAIN_NAME, chainId: CHAIN_ID, network: NETWORK, latestBlock: (await client.getBlockNumber()).toString(), explorer: EXPLORER_URL }, protocolVersion: PROTOCOL_VERSION, paymentAsset: token, buyer: c.env.BUYER_ADDRESS || null, merchant: c.env.MERCHANT_ADDRESS || null, facilitator: c.env.FACILITATOR_ADDRESS || null, endpoints: ENDPOINTS.map((item) => ({ ...item, price: `${formatUnitsExact(item.priceAtomic, TOKEN_DECIMALS)} ${TOKEN_SYMBOL}` })), retryPolicy: { maxAttempts: RETRY_DELAYS_MS.length, delaysMs: RETRY_DELAYS_MS, sameAuthorizationOnly: true }, disclosure: "Seller endpoints and identities are operated by this project; this is not independent commercial adoption." });
+});
+
+app.get("/api/evidence", async (c) => c.json({ runs: await new BuyerStore(c.env.DB).listReviewerTasks() }));
+app.get("/api/verify-secrets", (c) => {
+  const denied = requireOwner(c); if (denied) return denied;
+  const derived = (secret, expected) => Boolean(secret && expected && getAddress(privateKeyToAccount(secret).address) === getAddress(expected));
+  return c.json({ buyer: derived(c.env.BUYER_PRIVATE_KEY, c.env.BUYER_ADDRESS), facilitator: derived(c.env.FACILITATOR_PRIVATE_KEY, c.env.FACILITATOR_ADDRESS), merchant: derived(c.env.MERCHANT_PRIVATE_KEY, c.env.MERCHANT_ADDRESS), ownerTokenPresent: Boolean(c.env.OWNER_TOKEN), secretsPrinted: false });
+});
+app.get("/api/tasks/:id", async (c) => {
+  const snapshot = await new BuyerStore(c.env.DB).snapshot(c.req.param("id"));
+  return snapshot ? c.json(snapshot) : c.json({ error: "Run not found" }, 404);
+});
+
+app.post("/api/run/:kind", async (c) => {
+  const kindMap = { success: "SUCCESS", "budget-limited": "BUDGET_STOP", "price-cap": "CAP_REFUSAL" };
+  const kind = kindMap[c.req.param("kind")];
+  if (!kind) return c.json({ error: "Unknown run kind" }, 404);
+  if (kind !== "CAP_REFUSAL") { const denied = requireOwner(c); if (denied) return denied; }
+  const input = await c.req.json().catch(() => ({}));
+  const id = runId(input.runId || `${kind.toLowerCase().replaceAll("_", "-")}-${crypto.randomUUID()}`);
+  const config = kind === "CAP_REFUSAL" ? null : {
+    budgetAtomic: parseUnitsExact(String(input.budget || formatUnitsExact(RUN_PROFILES[kind].budgetAtomic, TOKEN_DECIMALS)), TOKEN_DECIMALS),
+    capAtomic: parseUnitsExact(String(input.cap || formatUnitsExact(RUN_PROFILES[kind].capAtomic, TOKEN_DECIMALS)), TOKEN_DECIMALS),
+  };
+  const stub = c.env.BUYER.get(c.env.BUYER.idFromName("buyer-global"));
+  return stub.fetch("https://buyer.internal/run", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runId: id, kind, config }) });
+});
+
+app.get("/paid/network-snapshot", (c) => handlePaidRequest(c.req.raw, c.env));
+app.get("/paid/activity-summary", (c) => handlePaidRequest(c.req.raw, c.env));
+app.get("/facilitator/supported", (c) => c.json(makeFacilitator(c.env).getSupported()));
+app.post("/facilitator/verify", async (c) => {
+  const denied = requireOwner(c); if (denied) return denied;
+  const { paymentPayload, paymentRequirements } = await c.req.json();
+  return c.json(await makeFacilitator(c.env).verify(paymentPayload, paymentRequirements));
+});
+app.post("/facilitator/settle", async (c) => c.json({ error: "Direct public settlement is disabled; the allowlisted seller coordinator performs settlement under the global gas ceiling." }, 403));
+
+app.get("/api/health", async (c) => c.json({ ok: true, chainId: await publicClient().getChainId(), worker: "pharos-x402-agent-buyer", profiles: Object.keys(RUN_PROFILES) }));
+app.notFound((c) => c.env.ASSETS.fetch(c.req.raw));
+
+export default app;

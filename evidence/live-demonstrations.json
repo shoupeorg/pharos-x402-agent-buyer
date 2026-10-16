@@ -1,0 +1,92 @@
+{
+  "recordedAt": "2026-10-16T12:03:21.542Z",
+  "network": {
+    "name": "Pharos Atlantic Testnet",
+    "chainId": 688689,
+    "caip2": "eip155:688689",
+    "explorer": "https://atlantic.pharosscan.xyz"
+  },
+  "deployment": {
+    "workerVersionId": "85be105c-4086-431b-80da-b53a96a10869",
+    "token": "0x71d7a8a38A777C5bB84a9aac5c5A727EE7955687",
+    "tokenDeploymentHash": "0x146dd52825f7308bb81cf9ac18d08e57eadd905897ec9c845ee78f3bd30ddebe",
+    "tokenDeploymentReceiptStatus": "success",
+    "tokenDeploymentBlock": "31495373",
+    "tokenDeploymentGasCostWei": "700788000000000"
+  },
+  "success": {
+    "runId": "review-success-20261016",
+    "status": "COMPLETED",
+    "snapshotBlock": "31495395",
+    "budgetAtomic": "5000",
+    "confirmedAtomic": "3000",
+    "reservedAtomic": "0",
+    "payments": [
+      {
+        "endpoint": "/paid/network-snapshot",
+        "amountAtomic": "1000",
+        "transactionHash": "0x44576d56d85f7d47782d7c1e5046d13ec92209d79082467cb098cc50d7a1e675",
+        "receiptStatus": "success",
+        "blockNumber": "31495621",
+        "gasCostWei": "82431000000000"
+      },
+      {
+        "endpoint": "/paid/activity-summary",
+        "amountAtomic": "2000",
+        "transactionHash": "0x9126e3aa8da840b7072033423f34ae3737bb7204475aecfd1fe5f559a6c69c04",
+        "receiptStatus": "success",
+        "blockNumber": "31495633",
+        "gasCostWei": "65360000000000",
+        "simulatedLostResponse": true,
+        "recoveredWithSameAuthorization": true,
+        "attempts": 2,
+        "retryDelayMs": 250
+      }
+    ],
+    "reportUsesBothResponses": true
+  },
+  "budgetStop": {
+    "runId": "review-budget-stop-20261016",
+    "status": "STOPPED_BUDGET",
+    "budgetAtomic": "1000",
+    "confirmedAtomic": "1000",
+    "reservedAtomic": "0",
+    "firstPaymentHash": "0xc549494454309aa8e53e77b5ff8efab44ae34a67c3ad5ad452fc8ed90dda22ac",
+    "firstPaymentReceiptStatus": "success",
+    "firstPaymentBlock": "31495662",
+    "firstPaymentGasCostWei": "65343000000000",
+    "secondQuoteAtomic": "2000",
+    "secondAuthorizationCreated": false,
+    "secondDebit": false
+  },
+  "priceCap": {
+    "runId": "review-price-cap-http200-20261016",
+    "status": "REFUSED_PRICE_CAP",
+    "quoteAtomic": "1000",
+    "capAtomic": "999",
+    "authorizationCreated": false,
+    "debit": false
+  },
+  "replay": {
+    "runId": "review-success-20261016",
+    "event": "REPLAY_NOOP",
+    "eventTimestamp": "2026-10-16T12:03:12.414Z",
+    "freshProcess": true,
+    "facilitatorNonceBefore": 4,
+    "facilitatorNonceAfter": 4,
+    "newAuthorization": false,
+    "newDebit": false
+  },
+  "totals": {
+    "confirmedApiSpendAtomic": "4000",
+    "confirmedApiSpendPXUSD": "0.004",
+    "blockchainTransactionCount": 4,
+    "settlementTransactionCount": 3,
+    "totalGasCostWei": "913922000000000",
+    "totalGasCostPHRS": "0.000913922",
+    "facilitatorRemainingBalanceWei": "999086078000000000",
+    "facilitatorRemainingBalancePHRS": "0.999086078",
+    "authorizedCeilingPHRS": "0.0168"
+  },
+  "disclosure": "The seller endpoints, buyer, merchant, facilitator, and test-only PXUSD token are operated by this project. The injected lost HTTP response is simulated; all three settlement receipts and token transfers are real Atlantic Testnet evidence."
+}

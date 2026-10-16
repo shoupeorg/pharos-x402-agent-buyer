@@ -1,0 +1,11 @@
+{
+  "createdAt": "2026-10-16T10:30:21.118Z",
+  "network": "eip155:688689",
+  "facilitator": "0x5e8cE33c83674dE1D594c325aC3C11E55AcAF124",
+  "buyer": "0x03091878d4C83B3c4f803D37bAd11a7d43056b43",
+  "merchant": "0x3B4a94628dB579353F39f980400DD5EC050D8979",
+  "predictedToken": "0x71d7a8a38A777C5bB84a9aac5c5A727EE7955687",
+  "ownerTokenSha256": "a53c74b3bb2e6e6dfcf613f7d6826c22799883cedd885e66300eb47f098ed969",
+  "secretStorage": "outside repository; NTFS ACL restricted to current Windows user; mirrored to Cloudflare encrypted secrets before funding",
+  "secretsPrinted": false
+}
